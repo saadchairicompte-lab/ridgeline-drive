@@ -224,6 +224,8 @@ function linkInit(role) {
   link.dropWheel = () => { for (const c of link.conns) c.close(); link.conns = []; };
   const onConn = c => {
     link.conns.push(c);
+    c.on('open', () => { link.stage = 'open'; if (role === 'game') { toast('Phone linked'); const t = document.getElementById('pairTip'); if (t) t.insertAdjacentHTML('beforeend', ' <b class="code">Phone linked.</b>'); } });
+    c.on('error', e => { link.lastConnErr = String(e && (e.type || e.message) || e); });
     c.on('data', m => { if (m && m.w) link.lastW = { d: m.w, at: Date.now(), id: c.peer }; if (m && m.c) link.lastC = { d: m.c, at: Date.now(), id: c.peer }; });
     c.on('close', () => { link.conns = link.conns.filter(k => k !== c); });
   };
@@ -247,12 +249,20 @@ function linkInit(role) {
   }).catch(() => { link.err = 'Couldn’t load the pairing library.'; showPairing(); });
 }
 // Phone, hosted: connect to the game with this code (retries until the peer is open).
+// If the data channel hasn't opened after 7 s, drop it and dial again; after 4 tries, say so.
 function linkConnect(code) {
-  link.code = code; link.err = '';
+  link.code = code; link.err = ''; link.stage = 'server'; let tries = 0;
   const go = () => {
     if (!link.peer || !link.ok) return setTimeout(go, 200);
-    const c = link.peer.connect(PAIR_PREFIX + code, { reliable: false, serialization: 'json' });
+    if (link.err) return;
+    link.dropWheel(); tries++; link.stage = 'dial';
+    const c = link.peer.connect(PAIR_PREFIX + code);
     link.onConn(c);
+    setTimeout(() => {
+      if (c.open || !padMode) return;
+      if (tries < 4) go();
+      else link.err = 'The phone found the game but couldn’t open a direct link to it' + (link.lastConnErr ? ' (' + link.lastConnErr + ')' : '') + '. Try putting both on the same Wi-Fi, then tap Exit and pair again.';
+    }, 7000);
   };
   go();
 }
@@ -289,6 +299,7 @@ let wheelSeenId = null;
 function wheelInput() {
   if (padMode || !link.ok) return null;
   const p = link.wheel(), now = performance.now();
+  if (HOSTED && link.conns.length && now - lastCarPub > 250 && (!p || Date.now() - p.at > 1500)) { lastCarPub = now; link.sendCar({ k: 0, g: 'N', on: started }); }
   if (!p || Date.now() - p.at > 1500) {
     if (wheelSeenId && p) { wheelSeenId = null; toast('Phone wheel lost'); }
     return null;
@@ -377,7 +388,10 @@ function padFrame(now) {
   const why = { blocked: 'this page isn’t allowed to read the tilt sensor', denied: 'motion access was refused', silent: 'no tilt readings reached this page' }[pad.why];
   const how = pad.touch ? (why ? 'Touch steering: ' + why + '.' : 'Touch steering.') : 'Tilt to steer.';
   const msg = link.err ? link.err
-    : !link.ok || !game ? (HOSTED ? 'Pairing with code ' + link.code + '…' : 'Open the game on your computer with the same account. It links up on its own.')
+    : !link.ok || !game ? (!HOSTED ? 'Open the game on your computer with the same account. It links up on its own.'
+      : !link.ok ? 'Step 1 of 3: reaching the pairing server…'
+      : link.stage !== 'open' ? 'Step 2 of 3: connecting to the game with code ' + link.code + '…'
+      : 'Step 3 of 3: linked, waiting for the game to answer. Keep the game tab open on the computer.')
     : (!game.on ? '<b>Linked.</b> Press Gas to start. ' : '<b>Linked</b> · gear ' + String(game.g).slice(0, 2) + '. ') + how;
   if (padEl.dataset.m !== msg) { padEl.dataset.m = msg; document.getElementById('padStat').innerHTML = msg; }
   document.getElementById('padSpd').textContent = game ? Number(game.k) || 0 : '–';
