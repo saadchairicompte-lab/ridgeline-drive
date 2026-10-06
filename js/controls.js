@@ -219,14 +219,15 @@ function linkInit(role) {
     return;
   }
   link.wheel = () => link.lastW; link.car = () => link.lastC;
-  link.sendWheel = w => { for (const c of link.conns) if (c.open) c.send({ w }); };
-  link.sendCar = c => { for (const k of link.conns) if (k.open) k.send({ c }); };
+  const direct = () => link.conns.some(c => c.open);
+  link.sendWheel = w => { if (direct()) { for (const c of link.conns) if (c.open) c.send({ w }); } else relaySend('w', w); };
+  link.sendCar = c => { if (direct()) { for (const k of link.conns) if (k.open) k.send({ c }); } else relaySend('c', c); };
   link.dropWheel = () => { for (const c of link.conns) c.close(); link.conns = []; };
   const onConn = c => {
     link.conns.push(c);
     c.on('open', () => { link.stage = 'open'; if (role === 'game') { toast('Phone linked'); const t = document.getElementById('pairTip'); if (t) t.insertAdjacentHTML('beforeend', ' <b class="code">Phone linked.</b>'); } });
     c.on('error', e => { link.lastConnErr = String(e && (e.type || e.message) || e); });
-    c.on('data', m => { if (m && m.w) link.lastW = { d: m.w, at: Date.now(), id: c.peer }; if (m && m.c) link.lastC = { d: m.c, at: Date.now(), id: c.peer }; });
+    c.on('data', m => { if (m && m.w) link.lastW = { d: m.w, at: Date.now(), id: 'phone' }; if (m && m.c) link.lastC = { d: m.c, at: Date.now(), id: 'game' }; });
     c.on('close', () => { link.conns = link.conns.filter(k => k !== c); });
   };
   link.onConn = onConn;
@@ -234,26 +235,57 @@ function linkInit(role) {
     if (role === 'game') {
       const open = () => {
         link.code = String(1000 + Math.floor(Math.random() * 9000));
+        relayJoin('w');
         const peer = new Peer(PAIR_PREFIX + link.code); link.peer = peer;
         peer.on('open', () => { link.ok = true; showPairing(); });
         peer.on('connection', onConn);
-        peer.on('error', e => { if (e.type === 'unavailable-id') { peer.destroy(); open(); } else { link.err = 'Pairing server unreachable (' + e.type + ').'; showPairing(); } });
+        peer.on('error', e => { if (e.type === 'unavailable-id') { peer.destroy(); open(); } else if (!link.relayOk) { link.err = 'Pairing server unreachable (' + e.type + ').'; showPairing(); } });
         peer.on('disconnected', () => { try { peer.reconnect(); } catch (e) {} });
       };
       open();
     } else {
       link.peer = new Peer();
       link.peer.on('open', () => { link.ok = true; });
-      link.peer.on('error', e => { link.err = e.type === 'peer-unavailable' ? 'No game with code ' + link.code + '. Check the code on your computer.' : 'Pairing failed (' + e.type + ').'; });
+      link.peer.on('error', e => { if (e.type === 'peer-unavailable') link.err = 'No game with code ' + link.code + '. Check the code on your computer.'; });
+      link.ok = true;   // the relay can carry the link even if the direct route never opens
     }
   }).catch(() => { link.err = 'Couldn’t load the pairing library.'; showPairing(); });
 }
 // Phone, hosted: connect to the game with this code (retries until the peer is open).
+/* Relay: when the direct WebRTC link can't open (some routers block it even on one Wi-Fi), both pages also
+   meet on a public MQTT broker over WebSocket, topic per pairing code. Slower than direct (~50-150 ms) but it
+   gets through. Only steering numbers travel on it. */
+const RELAY_BROKERS = ['wss://broker.emqx.io:8084/mqtt', 'wss://broker.hivemq.com:8884/mqtt'];
+let relayLast = 0;
+function relayJoin(listen) {
+  if (link.relay) return;
+  link.relay = 'loading';
+  const start = bi => {
+    const cl = mqtt.connect(RELAY_BROKERS[bi], { clientId: 'rd' + Math.random().toString(36).slice(2, 10), clean: true, connectTimeout: 6000, reconnectPeriod: 2000 });
+    link.relay = cl; let up = false;
+    cl.on('connect', () => { up = true; link.relayOk = true; if (listen === 'w' && !link.ok) { link.ok = true; link.err = ''; showPairing(); } cl.subscribe('ridgeline-drive/v1/' + link.code + '/' + listen, { qos: 0 }); });
+    cl.on('message', (t, buf) => {
+      let m; try { m = JSON.parse(buf.toString()); } catch (e) { return; }
+      if (!m || typeof m !== 'object') return;
+      if (listen === 'w') link.lastW = { d: m, at: Date.now(), id: 'phone' }; else link.lastC = { d: m, at: Date.now(), id: 'game' };
+      link.via = 'relay';
+    });
+    cl.on('error', () => {});
+    setTimeout(() => { if (!up && bi + 1 < RELAY_BROKERS.length) { cl.end(true); start(bi + 1); } }, 7000);
+  };
+  (window.mqtt ? Promise.resolve() : loadScript('https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js')).then(() => start(0)).catch(() => { link.relay = null; });
+}
+function relaySend(kind, d) {
+  const cl = link.relay; if (!cl || !cl.connected || !link.code) return;
+  const now = performance.now(); if (kind === 'w' && now - relayLast < 40) return; if (kind === 'w') relayLast = now;
+  cl.publish('ridgeline-drive/v1/' + link.code + '/' + kind, JSON.stringify(d), { qos: 0 });
+}
 // If the data channel hasn't opened after 7 s, drop it and dial again; after 4 tries, say so.
 function linkConnect(code) {
   link.code = code; link.err = ''; link.stage = 'server'; let tries = 0;
+  relayJoin('c');
   const go = () => {
-    if (!link.peer || !link.ok) return setTimeout(go, 200);
+    if (!link.peer || !link.peer.open) return setTimeout(go, 200);
     if (link.err) return;
     link.dropWheel(); tries++; link.stage = 'dial';
     const c = link.peer.connect(PAIR_PREFIX + code);
@@ -261,7 +293,7 @@ function linkConnect(code) {
     setTimeout(() => {
       if (c.open || !padMode) return;
       if (tries < 4) go();
-      else link.err = 'The phone found the game but couldn’t open a direct link to it' + (link.lastConnErr ? ' (' + link.lastConnErr + ')' : '') + '. Try putting both on the same Wi-Fi, then tap Exit and pair again.';
+      else if (!link.lastC) link.err = 'The phone found the game but couldn’t open a direct link to it' + (link.lastConnErr ? ' (' + link.lastConnErr + ')' : '') + '. Try putting both on the same Wi-Fi, then tap Exit and pair again.';
     }, 7000);
   };
   go();
@@ -389,10 +421,10 @@ function padFrame(now) {
   const how = pad.touch ? (why ? 'Touch steering: ' + why + '.' : 'Touch steering.') : 'Tilt to steer.';
   const msg = link.err ? link.err
     : !link.ok || !game ? (!HOSTED ? 'Open the game on your computer with the same account. It links up on its own.'
-      : !link.ok ? 'Step 1 of 3: reaching the pairing server…'
-      : link.stage !== 'open' ? 'Step 2 of 3: connecting to the game with code ' + link.code + '…'
-      : 'Step 3 of 3: linked, waiting for the game to answer. Keep the game tab open on the computer.')
-    : (!game.on ? '<b>Linked.</b> Press Gas to start. ' : '<b>Linked</b> · gear ' + String(game.g).slice(0, 2) + '. ') + how;
+      : !link.ok || !(link.peer && link.peer.open) && !link.relayOk ? 'Step 1 of 3: reaching the pairing server…'
+      : link.stage !== 'open' && !link.relayOk ? 'Step 2 of 3: connecting to the game with code ' + link.code + '…'
+      : 'Step 3 of 3: waiting for the game (code ' + link.code + ') to answer. Keep the game tab open on the computer.')
+    : (!game.on ? '<b>Linked' + (HOSTED && !link.conns.some(c => c.open) ? ' via relay' : '') + '.</b> Press Gas to start. ' : '<b>Linked</b> · gear ' + String(game.g).slice(0, 2) + '. ') + how;
   if (padEl.dataset.m !== msg) { padEl.dataset.m = msg; document.getElementById('padStat').innerHTML = msg; }
   document.getElementById('padSpd').textContent = game ? Number(game.k) || 0 : '–';
 }
