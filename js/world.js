@@ -178,29 +178,38 @@ function* tileJob(tx, tz, SEG) {
   tiles.set(tkey(tx, tz), { tx, tz, seg: SEG, group, col: new Float32Array(colliders) });
 }
 function disposeTile(k, t) { if (tiles.get(k) !== t) return; scene.remove(t.group); t.group.children[0].geometry.dispose(); t.group.children.forEach(o => o.dispose && o.dispose()); tiles.delete(k); }
-let curTx = 1e9, curTz = 1e9, tileJobNow = null;
-const segFor = (tx, tz) => Math.max(Math.abs(tx - curTx), Math.abs(tz - curTz)) <= 1 ? SEG : SEG_FAR;
+let curTx = 1e9, curTz = 1e9, curTx2 = 1e9, curTz2 = 1e9, tileJobNow = null;   // tile under each player's car (1e9: no second player)
+const cheb = (tx, tz, cx, cz) => Math.max(Math.abs(tx - cx), Math.abs(tz - cz));
+const tileDist = (tx, tz) => Math.min(cheb(tx, tz, curTx, curTz), curTx2 === 1e9 ? 1e9 : cheb(tx, tz, curTx2, curTz2));
+const segFor = (tx, tz) => tileDist(tx, tz) <= 1 ? SEG : SEG_FAR;
 // budget: tiles to finish synchronously (boot), or 0 in the frame loop, where queued tiles are built in
-// slices of about 3 ms per frame. Tiles entering the 3x3 around the car are rebuilt at full detail, and
-// tiles leaving it drop back to the coarse grid.
-function updateTiles(x, z, budget) {
+// slices of about 3 ms per frame. Tiles entering the 3x3 around a car are rebuilt at full detail, and
+// tiles leaving it drop back to the coarse grid. In two-player mode (x2, z2 = player 2's car) the world
+// streams around both cars, and a tile is kept while either car is near it.
+function updateTiles(x, z, budget, x2, z2) {
   const ctx = Math.floor(x / TILE), ctz = Math.floor(z / TILE);
-  if (ctx !== curTx || ctz !== curTz) {
-    curTx = ctx; curTz = ctz; tileJobNow = null;
-    for (const [k, t] of tiles) if (Math.max(Math.abs(t.tx - ctx), Math.abs(t.tz - ctz)) > RANGE + 1) disposeTile(k, t);
-    tileQueue = [];
-    for (let dz = -RANGE; dz <= RANGE; dz++) for (let dx = -RANGE; dx <= RANGE; dx++) {
-      const t = tiles.get(tkey(ctx + dx, ctz + dz)), seg = segFor(ctx + dx, ctz + dz);
-      if (!t || t.seg !== seg) tileQueue.push([ctx + dx, ctz + dz, dx * dx + dz * dz + (!t ? 0 : t.seg < seg ? 4 : 30)]);
+  const c2x = x2 == null ? 1e9 : Math.floor(x2 / TILE), c2z = z2 == null ? 1e9 : Math.floor(z2 / TILE);
+  if (ctx !== curTx || ctz !== curTz || c2x !== curTx2 || c2z !== curTz2) {
+    curTx = ctx; curTz = ctz; curTx2 = c2x; curTz2 = c2z; tileJobNow = null;
+    for (const [k, t] of tiles) if (tileDist(t.tx, t.tz) > RANGE + 1) disposeTile(k, t);
+    const want = new Map();
+    for (const [cx, cz] of [[ctx, ctz], [c2x, c2z]]) {
+      if (cx === 1e9) continue;
+      for (let dz = -RANGE; dz <= RANGE; dz++) for (let dx = -RANGE; dx <= RANGE; dx++) {
+        const k = tkey(cx + dx, cz + dz), t = tiles.get(k), seg = segFor(cx + dx, cz + dz);
+        if (t && t.seg === seg) continue;
+        const pri = dx * dx + dz * dz + (!t ? 0 : t.seg < seg ? 4 : 30), had = want.get(k);
+        if (!had || pri < had[2]) want.set(k, [cx + dx, cz + dz, pri]);
+      }
     }
-    tileQueue.sort((a, b) => a[2] - b[2]);
+    tileQueue = [...want.values()].sort((a, b) => a[2] - b[2]);
   }
   const t0 = performance.now();
   while (budget > 0 || performance.now() - t0 < 3) {
     if (!tileJobNow) {
       const next = tileQueue.shift(); if (!next) break;
       const [a, b] = next, seg = segFor(a, b), t = tiles.get(tkey(a, b));
-      if (Math.max(Math.abs(a - curTx), Math.abs(b - curTz)) > RANGE || (t && t.seg === seg)) continue;
+      if (tileDist(a, b) > RANGE || (t && t.seg === seg)) continue;
       tileJobNow = tileJob(a, b, seg);
     }
     if (tileJobNow.next().done) { tileJobNow = null; budget--; }

@@ -248,6 +248,7 @@ scene.add(water);
       small props (rocks) only up close, and only tiles near the shadow box cast shadows.
    3. Dynamic resolution: drops the pixel ratio while frames run slow and raises it again once they recover. */
 const renderStats = { pr: PR_MAX, ft: 16, tilesDrawn: 0, casters: 0 };
+let secondView = false;   // split screen: main.js sets this while drawing player 2's half, so frame timing is read once per frame
 {
   const up = new V3(0, 1, 0), ax = new V3().crossVectors(up, sunDir).normalize(), ay = new V3().crossVectors(sunDir, ax).normalize();
   const cf = new V3(), ctr = new V3(), sc = sun.shadow.camera, texel = (sc.right - sc.left) / sun.shadow.mapSize.x;
@@ -312,6 +313,6 @@ const renderStats = { pr: PR_MAX, ft: 16, tilesDrawn: 0, casters: 0 };
     sun.target.position.copy(ctr); sun.position.copy(ctr).addScaledVector(sunDir, 300);
     sun.updateMatrixWorld(); sun.target.updateMatrixWorld();
     cullTiles(cam);
-    if (cam === camera) adaptResolution();
+    if (cam === camera && !secondView) adaptResolution();
   };
 }

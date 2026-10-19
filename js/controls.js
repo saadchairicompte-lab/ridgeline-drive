@@ -22,7 +22,10 @@ for (const [id, k] of [['tL', 'L'], ['tR', 'R'], ['tG', 'G'], ['tB', 'B'], ['tH'
   const on = v => e => { e.preventDefault(); touch[k] = v; b.classList.toggle('on', v); };
   b.addEventListener('pointerdown', on(true)); b.addEventListener('pointerup', on(false)); b.addEventListener('pointercancel', on(false)); b.addEventListener('pointerleave', on(false));
 }
-function readInput(dt) {
+// slot 0 is player 1 (keyboard, touch, gamepads and the first phone); slot 1 is player 2's phone, read while
+// player 2's car is swapped in (players.js)
+function readInput(dt, slot = 0) {
+  if (slot) return readWheelOnly(dt, wheelInput(1));
   let thr = (keys.KeyW || keys.ArrowUp || touch.G) ? 1 : 0, brk = (keys.KeyS || keys.ArrowDown || touch.B) ? 1 : 0;
   let st = ((keys.KeyD || keys.ArrowRight || touch.R) ? 1 : 0) - ((keys.KeyA || keys.ArrowLeft || touch.L) ? 1 : 0);
   let hb = (keys.Space || touch.H) ? 1 : 0, analog = false;
@@ -34,7 +37,7 @@ function readInput(dt) {
     if (p.buttons[0] && p.buttons[0].pressed) hb = 1;
     if (p.buttons[3] && p.buttons[3].pressed && !p._y) resetCar(); p._y = p.buttons[3] && p.buttons[3].pressed;
   }
-  const w = wheelInput();
+  const w = wheelInput(0);
   if (w) {
     if (!started && w.g > 0.5) window.__game?.start?.();
     thr = Math.max(thr, w.g); brk = Math.max(brk, w.b); if (w.h) hb = 1;
@@ -43,6 +46,18 @@ function readInput(dt) {
   if (!started) { thr = brk = st = 0; hb = 0; }
   if (analog) car.steer = st;
   else { const rate = (st === 0 || Math.sign(st) !== Math.sign(car.steer)) ? 6 : 2.8; car.steer += clamp(st - car.steer, -rate * dt, rate * dt); }
+  car.thrIn += clamp(thr - car.thrIn, -8 * dt, 5 * dt);
+  car.brkIn += clamp(brk - car.brkIn, -10 * dt, 8 * dt);
+  car.hand = hb;
+}
+function readWheelOnly(dt, w) {
+  let thr = 0, brk = 0, hb = 0;
+  if (w) {
+    if (!started && w.g > 0.5) window.__game?.start?.();
+    thr = w.g; brk = w.b; hb = w.h;
+    car.steer += (w.s - car.steer) * Math.min(1, 45 * dt);
+  } else car.steer += clamp(-car.steer, -6 * dt, 6 * dt);
+  if (!started) { thr = brk = hb = 0; car.steer = 0; }
   car.thrIn += clamp(thr - car.thrIn, -8 * dt, 5 * dt);
   car.brkIn += clamp(brk - car.brkIn, -10 * dt, 8 * dt);
   car.hand = hb;
@@ -132,7 +147,7 @@ function updateAudio() {
    Steering comes from tilt (devicemotion or deviceorientation) when the page is given the motion sensor, or
    from a thumb pad: the claude.ai frame may not pass motion sensors through, so touch is the fallback and
    can also be picked by hand. */
-let padMode = false, lastCarPub = 0, wheelSeen = { r: 0, c: 0 };
+let padMode = false, lastCarPub = 0;
 const WHEEL_LOCK = 0.8;                       // phone rotation (rad, about 45 degrees) for full steering lock
 const wheelCss = `
 #wheelPad{position:fixed;inset:0;z-index:20;display:none;gap:10px;
@@ -200,7 +215,9 @@ document.body.insertAdjacentHTML('beforeend', `
    sendWheel/sendCar push absolute state, wheel()/car() return the newest {d, at, id} from the other end. */
 const HOSTED = !(window.claude && window.claude.use);
 const PAIR_PREFIX = 'ridgeline-drive-';
-const link = { ok: false, err: '', code: '', lastW: null, lastC: null, conns: [] };
+const link = { ok: false, err: '', code: '', lastWs: new Map(), lastC: null, conns: [] };
+// each phone tags its wheel updates with its own id, so the computer can tell two phones apart (two players)
+const gotWheel = (d, fallbackId) => { const id = String(d.i || fallbackId); link.lastWs.set(id, { d, at: Date.now(), id }); };
 const loadScript = src => new Promise((res, rej) => { const s = document.createElement('script'); s.src = src; s.onload = res; s.onerror = rej; document.head.appendChild(s); });
 function linkInit(role) {
   if (link.role) return; link.role = role;
@@ -213,12 +230,13 @@ function linkInit(role) {
       link.sendWheel = w => room.presence({ wheel: w }).catch(() => {});
       link.sendCar = c => room.presence({ car: c }).catch(() => {});
       const newest = key => { let best = null; for (const p of room.peers()) { const v = p.presence && p.presence[key]; if (p.isMe && !p.sameTab && v && typeof v === 'object' && (!best || p.updatedAt > best.at)) best = { d: v, at: p.updatedAt, id: p.peer }; } return best; };
-      link.wheel = () => newest('wheel'); link.car = () => newest('car');
+      link.wheels = () => { const out = []; for (const p of room.peers()) { const v = p.presence && p.presence.wheel; if (p.isMe && !p.sameTab && v && typeof v === 'object') out.push({ d: v, at: p.updatedAt, id: String(v.i || p.peer) }); } return out; };
+      link.car = () => newest('car');
       link.dropWheel = () => room.presence({ wheel: null }).catch(() => {});
     })();
     return;
   }
-  link.wheel = () => link.lastW; link.car = () => link.lastC;
+  link.wheels = () => [...link.lastWs.values()]; link.car = () => link.lastC;
   const direct = () => link.conns.some(c => c.open);
   link.sendWheel = w => { if (direct()) { for (const c of link.conns) if (c.open) c.send({ w }); } else relaySend('w', w); };
   link.sendCar = c => { if (direct()) { for (const k of link.conns) if (k.open) k.send({ c }); } else relaySend('c', c); };
@@ -227,7 +245,7 @@ function linkInit(role) {
     link.conns.push(c);
     c.on('open', () => { link.stage = 'open'; if (role === 'game') { toast('Phone linked'); const t = document.getElementById('pairTip'); if (t) t.insertAdjacentHTML('beforeend', ' <b class="code">Phone linked.</b>'); } });
     c.on('error', e => { link.lastConnErr = String(e && (e.type || e.message) || e); });
-    c.on('data', m => { if (m && m.w) link.lastW = { d: m.w, at: Date.now(), id: 'phone' }; if (m && m.c) link.lastC = { d: m.c, at: Date.now(), id: 'game' }; });
+    c.on('data', m => { if (m && m.w && typeof m.w === 'object') gotWheel(m.w, c.peer); if (m && m.c) link.lastC = { d: m.c, at: Date.now(), id: 'game' }; });
     c.on('close', () => { link.conns = link.conns.filter(k => k !== c); });
   };
   link.onConn = onConn;
@@ -267,7 +285,7 @@ function relayJoin(listen) {
     cl.on('message', (t, buf) => {
       let m; try { m = JSON.parse(buf.toString()); } catch (e) { return; }
       if (!m || typeof m !== 'object') return;
-      if (listen === 'w') link.lastW = { d: m, at: Date.now(), id: 'phone' }; else link.lastC = { d: m, at: Date.now(), id: 'game' };
+      if (listen === 'w') gotWheel(m, 'relay'); else link.lastC = { d: m, at: Date.now(), id: 'game' };
       link.via = 'relay';
     });
     cl.on('error', () => {});
@@ -312,7 +330,7 @@ const urlPair = (location.search.match(/[?&]pair=(\d{4})/) || [])[1] || '';
     card.insertBefore(tip, b);
   } else {
     tip.innerHTML = HOSTED ? '<b>Phone as a wheel:</b> getting a pairing code…'
-      : '<b>Phone as a wheel:</b> open this same link on your phone, signed in to the same account, and tap <b>Use this phone as a steering wheel</b>.';
+      : '<b>Phone as a wheel:</b> open this same link on your phone, signed in to the same account, and tap <b>Use this phone as a steering wheel</b>. Do it on a second phone for two-player split screen.';
     card.insertBefore(tip, go);
     linkInit('game');
   }
@@ -321,29 +339,48 @@ function showPairing() {
   const tip = document.getElementById('pairTip'); if (!tip) return;
   if (link.err) { tip.innerHTML = '<b>Phone as a wheel:</b> ' + link.err; return; }
   const url = location.origin + location.pathname + '?pair=' + link.code;
-  tip.innerHTML = '<span class="pairRow"><span id="qr"></span><span><b>Phone as a wheel:</b> scan this with your phone, or open this page on it and enter code <b class="code">' + link.code + '</b>. Then tap <b>Use this phone as a steering wheel</b>.</span></span>';
+  tip.innerHTML = '<span class="pairRow"><span id="qr"></span><span><b>Phone as a wheel:</b> scan this with your phone, or open this page on it and enter code <b class="code">' + link.code + '</b>. Then tap <b>Use this phone as a steering wheel</b>. A second phone can pair the same way for two-player split screen.</span></span>';
   const draw = () => new QRCode(document.getElementById('qr'), { text: url, width: 96, height: 96, colorDark: '#0b1216', colorLight: '#ece2d0' });
   (window.QRCode ? Promise.resolve() : loadScript('https://cdnjs.cloudflare.com/ajax/libs/qrcodejs/1.0.0/qrcode.min.js')).then(draw).catch(() => {});
   const keys = document.getElementById('keys'); if (keys && !document.getElementById('pairKey')) keys.insertAdjacentHTML('beforeend', '<span id="pairKey"><b>' + link.code + '</b>phone code</span>');
 }
 
-let wheelSeenId = null;
-function wheelInput() {
-  if (padMode || !link.ok) return null;
-  const p = link.wheel(), now = performance.now();
-  if (HOSTED && link.conns.length && now - lastCarPub > 250 && (!p || Date.now() - p.at > 1500)) { lastCarPub = now; link.sendCar({ k: 0, g: 'N', on: started }); }
-  if (!p || Date.now() - p.at > 1500) {
-    if (wheelSeenId && p) { wheelSeenId = null; toast('Phone wheel lost'); }
-    return null;
+/* Seats: the first phone to send a wheel drives player 1, the second drives player 2 (players.js splits the
+   screen). A seat is kept for a while after its phone goes quiet (screen lock, Wi-Fi blip) and given up after
+   SEAT_HOLD, so a phone that comes back gets its own car back. A third phone is told the game is full. */
+const seats = [null, null], SEAT_HOLD = 15000, WHEEL_STALE = 1500;
+function pollWheels() {
+  if (padMode || !link.ok || !link.wheels) return;
+  const now = Date.now(), list = link.wheels(), fresh = list.filter(p => now - p.at < WHEEL_STALE);
+  for (let i = 0; i < 2; i++) {
+    const s = seats[i]; if (!s) continue;
+    const p = list.find(q => q.id === s.id), age = p ? now - p.at : 1e9;
+    if (age >= WHEEL_STALE && s.live) { s.live = false; toast(twoUp() ? 'Player ' + (i + 1) + ' wheel lost' : 'Phone wheel lost'); }
+    else if (age < WHEEL_STALE && !s.live) { s.live = true; toast(twoUp() ? 'Player ' + (i + 1) + ' wheel back' : 'Phone wheel connected'); }
+    if (age > SEAT_HOLD) { seats[i] = null; if (i === 1) setTwoPlayer(false); }
   }
+  for (const p of fresh) {
+    if (seats.some(s => s && s.id === p.id)) continue;
+    const i = seats.indexOf(null); if (i < 0) break;
+    seats[i] = { id: p.id, r: p.d.r, c: p.d.c, live: true };
+    if (i === 1) { setTwoPlayer(true); toast('Player 2 joined'); } else toast(seats[1] ? 'Player 1 wheel connected' : 'Phone wheel connected');
+  }
+  const t = performance.now();
+  if (t - lastCarPub > 100 && (fresh.length || (HOSTED && link.conns.length))) {
+    lastCarPub = t;
+    const info = c => ({ k: Math.round(Math.abs(c.fwdSpeed) * 3.6), g: c.reverse ? 'R' : String(c.gear) }), p = {};
+    seats.forEach((s, i) => { if (s) p[s.id] = Object.assign(info(i ? P2.state : car), { n: i + 1 }); });
+    link.sendCar(Object.assign(info(car), { on: started, p, full: !seats.includes(null) }));
+  }
+}
+// Called while that seat's car is the one in `car` (player 2 is swapped in by players.js), so reset and
+// camera taps act on the right player.
+function wheelInput(slot) {
+  const s = seats[slot]; if (padMode || !s || !s.live) return null;
+  const p = link.wheels().find(q => q.id === s.id); if (!p) return null;
   const w = p.d, num = (v, a, b) => clamp(Number(v) || 0, a, b);
-  if (wheelSeenId !== p.id) { wheelSeenId = p.id; wheelSeen = { r: w.r, c: w.c }; toast('Phone wheel connected'); }
-  if (w.r !== wheelSeen.r) { wheelSeen.r = w.r; if (started) resetCar(); }
-  if (w.c !== wheelSeen.c) { wheelSeen.c = w.c; if (started) camMode = (camMode + 1) % 3; }
-  if (now - lastCarPub > 100) {
-    lastCarPub = now;
-    link.sendCar({ k: Math.round(Math.abs(car.fwdSpeed) * 3.6), g: car.reverse ? 'R' : String(car.gear), on: started });
-  }
+  if (w.r !== s.r) { s.r = w.r; if (started) resetCar(); }
+  if (w.c !== s.c) { s.c = w.c; if (started) camMode = (camMode + 1) % 3; }
   return { s: num(w.s, -1, 1), g: num(w.g, 0, 1), b: num(w.b, 0, 1), h: w.h ? 1 : 0 };
 }
 // Audio can only start from a gesture on the computer itself; if the phone started the run, resume on the next one.
@@ -351,7 +388,8 @@ const resumeAudio = () => { if (audio && audio.ac.state === 'suspended') audio.a
 addEventListener('pointerdown', resumeAudio); addEventListener('keydown', resumeAudio);
 
 /* ---- phone side ---- */
-const pad = { s: 0, g: 0, b: 0, h: 0, r: 0, c: 0, a0: null, a: 0, gx: 0, gy: 0, sensor: false, touch: false, picked: false, why: '', beat: 0, tilt: 0 };
+const pad = { id: (() => { try { let v = sessionStorage.getItem('rd-wheel-id'); if (!v) sessionStorage.setItem('rd-wheel-id', v = Math.random().toString(36).slice(2, 10)); return v; } catch (e) { return Math.random().toString(36).slice(2, 10); } })(),
+  s: 0, g: 0, b: 0, h: 0, r: 0, c: 0, a0: null, a: 0, gx: 0, gy: 0, sensor: false, touch: false, picked: false, why: '', beat: 0, tilt: 0 };
 const padEl = document.getElementById('wheelPad');
 function setTouchSteer(on) {
   pad.touch = on; padEl.classList.toggle('touchsteer', on);
@@ -431,11 +469,14 @@ function padFrame(now) {
   requestAnimationFrame(padFrame);
   if (now - pad.beat > 300) pad.beat = now;
   const r2 = v => Math.round(v * 100) / 100;
-  if (link.ok) link.sendWheel({ s: r2(pad.s), g: r2(pad.g), b: r2(pad.b), h: pad.h, r: pad.r, c: pad.c, t: Math.round(pad.beat) });
+  if (link.ok) link.sendWheel({ i: pad.id, s: r2(pad.s), g: r2(pad.g), b: r2(pad.b), h: pad.h, r: pad.r, c: pad.c, t: Math.round(pad.beat) });
   document.getElementById('padWheel').setAttribute('transform', 'rotate(' + (pad.s * WHEEL_LOCK * 57.3).toFixed(1) + ')');
   document.querySelector('#pGas i').style.height = (pad.g * 100) + '%';
   document.querySelector('#pBrk i').style.height = (pad.b * 100) + '%';
   const gp = link.ok && link.car(), game = gp && Date.now() - gp.at < 3000 ? gp.d : null;
+  // two players: the game sends each phone its own car under p[phone id]
+  const mine = game && game.p && game.p[pad.id], me = mine || game, full = game && game.p && !mine && game.full;
+  const who = mine && (game.p && Object.keys(game.p).length > 1 || mine.n > 1) ? 'Player ' + mine.n + ' · ' : '';
   const why = { blocked: 'this page isn’t allowed to read the tilt sensor', denied: 'motion access was refused', silent: 'no tilt readings reached this page' }[pad.why];
   const how = pad.touch ? (why ? 'Touch steering: ' + why + '.' : 'Touch steering.') : 'Tilt to steer.';
   const msg = link.err ? link.err
@@ -443,9 +484,10 @@ function padFrame(now) {
       : !link.ok || !(link.peer && link.peer.open) && !link.relayOk ? 'Step 1 of 3: reaching the pairing server…'
       : link.stage !== 'open' && !link.relayOk ? 'Step 2 of 3: connecting to the game with code ' + link.code + '…'
       : 'Step 3 of 3: waiting for the game (code ' + link.code + ') to answer. Keep the game tab open on the computer.')
-    : (!game.on ? '<b>Linked' + (HOSTED && !link.conns.some(c => c.open) ? ' via relay' : '') + '.</b> Press Gas to start. ' : '<b>Linked</b> · gear ' + String(game.g).slice(0, 2) + '. ') + how;
+    : full ? 'The game already has two players. Tap Exit, or wait for a seat to free up.'
+    : (!game.on ? '<b>' + who + 'Linked' + (HOSTED && !link.conns.some(c => c.open) ? ' via relay' : '') + '.</b> Press Gas to start. ' : '<b>' + who + 'Linked</b> · gear ' + String(me.g).slice(0, 2) + '. ') + how;
   if (padEl.dataset.m !== msg) { padEl.dataset.m = msg; document.getElementById('padStat').innerHTML = msg; }
-  document.getElementById('padSpd').textContent = game ? Number(game.k) || 0 : '–';
+  document.getElementById('padSpd').textContent = me && !full ? Number(me.k) || 0 : '–';
 }
 // Pedals: analog by how high the finger sits on the button (top = full), never below 40% once pressed.
 for (const [id, k] of [['pGas', 'g'], ['pBrk', 'b']]) {

@@ -10,8 +10,8 @@ let toastT = 0;
 function toast(msg) { hud.toast.textContent = msg; hud.toast.classList.add('on'); toastT = 2.2; }
 const gauge = $('gauge'), gctx = gauge.getContext('2d'), mapC = $('map'), mctx = mapC.getContext('2d');
 function fitCanvas(c) { const r = c.getBoundingClientRect(), d = Math.min(devicePixelRatio || 1, 2); c.width = Math.round(r.width * d) || c.width; c.height = Math.round(r.height * d) || c.height; }
-function drawGauge() {
-  const c = gctx, S = gauge.width, cx = S / 2, cy = S / 2, R = S * 0.43, a0 = Math.PI * 0.75, a1 = Math.PI * 2.25, A = v => a0 + (a1 - a0) * v / 8000;
+function drawGauge(c = gctx) {
+  const S = c.canvas.width, cx = S / 2, cy = S / 2, R = S * 0.43, a0 = Math.PI * 0.75, a1 = Math.PI * 2.25, A = v => a0 + (a1 - a0) * v / 8000;
   c.clearRect(0, 0, S, S);
   c.beginPath(); c.arc(cx, cy, R + S * 0.04, 0, TAU); c.fillStyle = COLS.panel; c.fill(); c.lineWidth = 1; c.strokeStyle = COLS.line; c.stroke();
   c.lineCap = 'butt'; c.lineWidth = S * 0.03;
@@ -27,8 +27,8 @@ function drawGauge() {
   }
 }
 let mapPath = null;
-function drawMap() {
-  const c = mctx, S = mapC.width, sc = S / 170 * 0.07;
+function drawMap(c = mctx) {
+  const S = c.canvas.width, sc = S / 170 * 0.07;
   if (!mapPath) { mapPath = new Path2D(); const { xs, zs, N } = road; mapPath.moveTo(xs[0], zs[0]); for (let i = 1; i < N; i++) mapPath.lineTo(xs[i], zs[i]); mapPath.closePath(); }
   const yaw = Math.atan2(fwd.x, fwd.z);
   c.setTransform(1, 0, 0, 1, 0, 0); c.clearRect(0, 0, S, S);
@@ -36,6 +36,8 @@ function drawMap() {
   c.translate(S / 2, S / 2); c.rotate(Math.PI + yaw); c.scale(-sc, sc); c.translate(-car.pos.x, -car.pos.z);
   c.lineJoin = 'round'; c.strokeStyle = 'rgba(236,226,208,.8)'; c.lineWidth = 3 / sc * (S / 170); c.stroke(mapPath);
   c.fillStyle = COLS.accent; c.beginPath(); c.arc(road.xs[0], road.zs[0], 5 / sc * (S / 170), 0, TAU); c.fill();
+  const o = typeof otherCarPos === 'function' && otherCarPos();   // split screen: the other player's car
+  if (o) { c.fillStyle = COLS.text; c.strokeStyle = '#0b1216'; c.lineWidth = 2 / sc * (S / 170); c.beginPath(); c.arc(o.x, o.z, 6 / sc * (S / 170), 0, TAU); c.fill(); c.stroke(); }
   c.restore();
   c.setTransform(1, 0, 0, 1, S / 2, S / 2); const k = S / 170;
   c.fillStyle = COLS.hot; c.beginPath(); c.moveTo(0, -8 * k); c.lineTo(5 * k, 6 * k); c.lineTo(0, 3 * k); c.lineTo(-5 * k, 6 * k); c.closePath(); c.fill();
@@ -57,7 +59,11 @@ function updateLap(dt) {
       if (lap.lastProg > 0.9 && prog < 0.1) {
         if (lap.armed && lap.half) {
           const t = clock - lap.start; lap.last = t;
-          if (!lap.best || t < lap.best) { lap.best = t; toast('New best lap ' + fmt(t)); try { localStorage.setItem('ridgeline-best', String(t)); } catch (e) {} }
+          if (!lap.best || t < lap.best) {
+            lap.best = t; toast('New best lap ' + fmt(t));
+            // one record per computer: in split screen a player's personal best only saves when it beats it
+            try { const b = parseFloat(localStorage.getItem('ridgeline-best')); if (!(b > 0) || t < b) localStorage.setItem('ridgeline-best', String(t)); } catch (e) {}
+          }
           else toast('Lap ' + fmt(t));
         } else if (!lap.armed) toast('Lap started');
         lap.armed = true; lap.half = false; lap.start = clock;
@@ -73,8 +79,8 @@ function updateLap(dt) {
 }
 
 // ABS / TCS lamps: lit while the aid is working, struck through when aids are switched off (T)
-function updateLamps() {
+function updateLamps(h = hud) {
   const a = car.assist || {};
-  hud.abs.className = a.abs === false ? 'off' : car.absActive ? 'on' : '';
-  hud.tcs.className = a.tcs === false ? 'off' : car.tcsActive ? 'on' : '';
+  h.abs.className = a.abs === false ? 'off' : car.absActive ? 'on' : '';
+  h.tcs.className = a.tcs === false ? 'off' : car.tcsActive ? 'on' : '';
 }
