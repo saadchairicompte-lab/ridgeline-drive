@@ -1,4 +1,4 @@
-// Ridgeline Drive: Two players on one computer, each driving from their own phone, on a screen split top and bottom.
+// Ridgeline Drive: Two players on one computer (split screen, one phone each), race mode, and driving help for everyone: auto-recovery, wrong-way warning, join hint.
 // Classic script: top-level declarations are shared with the other files, loaded in the order index.html lists them.
 'use strict';
 /* ================= second player =================
@@ -142,3 +142,155 @@ function buildHud2() {
   hud2 = { abs: $('lampAbs2'), tcs: $('lampTcs2'), lap: $('lapTime2'), best: $('best2'), last: $('lastLap2'), dt: $('driftTotal2'), dn: $('driftNow2'),
     spd: $('spd2'), gear: $('gear2'), gctx: $('gauge2').getContext('2d'), mctx: $('map2').getContext('2d'), gauge: $('gauge2'), map: $('map2') };
 }
+
+/* ================= race mode =================
+   G on the keyboard or Race on either phone puts every car on a grid just before the chequered gantry, counts
+   down 3-2-1 and runs a RACE_LAPS race. Progress is laps plus position along the road loop; a lap only counts
+   after passing the half-way point, so turning round at the line doesn't add laps. One player = time trial. */
+const RACE_LAPS = 3;
+const newRP = () => ({ laps: -1, prog: 0.99, last: -1, half: false, done: null, total: -0.01 });
+const race = { ph: 'idle', t: 0, t0: 0, p: [newRP(), newRP()] };
+const ORD = ['1st', '2nd'];
+function startRace() {
+  if (!started) return;
+  const i = road.N - 10, side = P2.on ? 2.4 : 0;
+  eachPlayer(k => {
+    placeOnRoad(i);
+    car.pos.addScaledVector(left.set(1, 0, 0).applyQuaternion(car.q), k ? side : -side);
+    car.pos.y = Math.max(H(car.pos.x, car.pos.z), WATER) + 0.9;
+    car.steer = car.thrIn = car.brkIn = 0; lap.armed = false; drift.cur = 0; camInit = false;
+  });
+  race.ph = 'countdown'; race.t = 3.5; race.p = [newRP(), newRP()];
+  for (const r of rec) r.flip = r.stuck = r.wrong = 0;
+}
+function trackProgress(i) {
+  const r = race.p[i]; if (r.done != null) return;
+  roadQuery(car.pos.x, car.pos.z); if (RQ.d > 40) return;   // far off the road: keep the last reading
+  const prog = (RQ.i + RQ.t) / road.N;
+  if (r.last >= 0) {
+    if (r.last > 0.9 && prog < 0.1) { if (r.laps < 0 || r.half) { r.laps++; r.half = false; if (r.laps > 0 && r.laps < RACE_LAPS) banner(i, r.laps === RACE_LAPS - 1 ? 'Final lap' : 'Lap ' + (r.laps + 1), 1.6); } }
+    else if (r.last < 0.1 && prog > 0.9 && r.laps >= 0) { r.laps--; r.half = true; }
+    if (prog > 0.45 && prog < 0.55) r.half = true;
+  }
+  r.last = prog; r.total = r.laps + prog;
+  if (r.laps >= RACE_LAPS) { r.done = clock - race.t0; r.total = RACE_LAPS + 1; banner(i, P2.on ? 'Finished ' + ORD[placeOf(i)] : 'Finished ' + fmt(r.done), 4); }
+}
+// 0 = leading. Finished players rank by time, the rest by distance covered.
+function placeOf(i) {
+  if (!P2.on) return 0;
+  const a = race.p[i], b = race.p[1 - i];
+  if (a.done != null && b.done != null) return a.done <= b.done ? 0 : 1;
+  if (a.done != null || b.done != null) return a.done != null ? 0 : 1;
+  return a.total >= b.total ? 0 : 1;
+}
+function updateRace(dt) {
+  if (race.ph === 'idle') return;
+  if (race.ph === 'countdown') {
+    const before = Math.ceil(race.t); race.t -= dt;
+    if (race.t <= 0) { race.ph = 'running'; race.t0 = clock; banner(-1, 'GO!', 1); }
+    else if (Math.ceil(race.t) !== before && race.t < 3) banner(-1, String(Math.ceil(race.t)), 0.9);
+    return;
+  }
+  if (race.ph === 'running') {
+    eachPlayer(trackProgress);
+    const n = P2.on ? 2 : 1, done = race.p.slice(0, n).filter(r => r.done != null);
+    if (done.length === n || (done.length && clock - race.t0 - Math.min(...done.map(r => r.done)) > 45)) {
+      race.ph = 'done'; race.t = 7;
+      if (n === 2) {
+        const [a, b] = race.p, w = placeOf(0) === 0 ? 0 : 1, l = race.p[1 - w];
+        banner(-1, 'Player ' + (w + 1) + ' wins' + (l.done != null ? ' by ' + Math.abs(a.done - b.done).toFixed(1) + ' s' : ''), 6);
+      }
+    }
+    return;
+  }
+  race.t -= dt; if (race.t <= 0) race.ph = 'idle';
+}
+// one line per player for the race pill and the phone
+function raceLine(i) {
+  if (race.ph === 'idle') return '';
+  if (race.ph === 'countdown') return race.t < 3 ? String(Math.ceil(race.t)) : 'Get ready';
+  const r = race.p[i];
+  if (r.done != null) return (P2.on ? ORD[placeOf(i)] + ' · ' : '') + fmt(r.done);
+  return 'Lap ' + Math.max(1, Math.min(RACE_LAPS, r.laps + 1)) + '/' + RACE_LAPS + (P2.on ? ' · ' + ORD[placeOf(i)] : '') + ' · ' + fmt(clock - race.t0);
+}
+
+/* ================= driving help =================
+   Per player: a car stuck on its side or roof, or pinned with the throttle down, is put back on the road on its
+   own; driving against the loop shows "Wrong way"; hard hits are counted so the phone can buzz. */
+const rec = [0, 1].map(() => ({ flip: 0, stuck: 0, wrong: 0, hits: 0, latch: false }));
+const rTan = new V3();
+function assistPlayer(i, dt) {
+  const r = rec[i];
+  if (car.impact > 0.3 && !r.latch) { r.hits++; r.latch = true; } else if (car.impact < 0.1) r.latch = false;
+  if (!started || race.ph === 'countdown') { r.flip = r.stuck = r.wrong = 0; return; }
+  r.flip = up.y < 0.3 && car.speed < 4 ? r.flip + dt : 0;
+  r.stuck = (car.thrIn > 0.5 || car.brkIn > 0.5) && car.speed < 0.5 ? r.stuck + dt : 0;
+  if (r.flip > 2 || r.stuck > 5) { const msg = r.flip > 2 ? 'Back on your wheels' : 'Unstuck'; resetCar(); banner(i, msg, 1.4); r.flip = r.stuck = 0; return; }
+  roadQuery(car.pos.x, car.pos.z);
+  if (RQ.d < ROAD_HALF + 4 && car.speed > 6) {
+    const a = RQ.i, b = (a + 1) % road.N;
+    rTan.set(road.xs[b] - road.xs[a], 0, road.zs[b] - road.zs[a]).normalize();
+    r.wrong = rTan.x * car.vel.x + rTan.z * car.vel.z < -0.5 * car.speed ? r.wrong + dt : 0;
+  } else r.wrong = 0;
+  if (r.wrong > 1.2) banner(i, 'Wrong way', 0.25, true);
+}
+
+/* ================= on-screen race text, name tags, join hint ================= */
+const extraCss = `
+.rstat{top:calc(14px + env(safe-area-inset-top,0px));left:50%;transform:translateX(-50%);padding:6px 16px;font-family:var(--display);font-weight:700;font-size:22px;letter-spacing:.04em;white-space:nowrap;display:none}
+.rstat.on{display:block}
+#rstat2{top:calc(50% + 14px)}
+.rban{top:38%;left:0;right:0;text-align:center;font-family:var(--display);font-weight:800;font-style:italic;font-size:76px;line-height:1;color:var(--accent);text-shadow:0 3px 18px rgba(0,0,0,.55);opacity:0;transition:opacity .2s}
+.rban.on{opacity:1}.rban.warn{color:var(--hot)}
+#rban2{display:none}
+body.split .rban{font-size:56px}body.split #rban1{top:17%}body.split #rban2{display:block;top:67%}
+#joinHint{left:50%;bottom:calc(14px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);padding:8px 12px;display:none;align-items:center;gap:10px;max-width:min(440px,calc(100vw - 420px));font-size:11px;line-height:1.5;color:var(--dim)}
+#joinHint.on{display:flex}#joinHint b{color:var(--text);font-weight:500}#joinHint .code{color:var(--accent);font-size:14px;letter-spacing:.12em}
+#joinQr{flex:none;padding:4px;background:#ece2d0;border-radius:3px;line-height:0}#joinQr:empty{display:none}
+body.split #joinHint,body.touch #joinHint{display:none!important}
+@media (max-width:900px){#joinHint{display:none!important}}
+`;
+document.head.insertAdjacentHTML('beforeend', '<style>' + extraCss + '</style>');
+document.body.insertAdjacentHTML('beforeend', '<div class="hud panel rstat" id="rstat1"></div><div class="hud panel rstat p2" id="rstat2"></div>' +
+  '<div class="hud rban" id="rban1"></div><div class="hud rban" id="rban2"></div><div class="hud panel" id="joinHint"></div>');
+const rbans = [$('rban1'), $('rban2')], rstats = [$('rstat1'), $('rstat2')], banT = [0, 0];
+// i = -1 shows the text to everyone
+function banner(i, text, secs, warn) {
+  for (const k of i < 0 ? [0, 1] : [i]) {
+    const el = rbans[k]; if (el.textContent !== text) el.textContent = text;
+    el.classList.toggle('warn', !!warn); el.classList.add('on'); banT[k] = Math.max(banT[k], secs);
+    if (!P2.on && k === 0 && i < 0) break;
+  }
+}
+// solo, rban1 covers the whole screen; in split screen each half has its own
+function updateRaceHud(dt) {
+  for (let k = 0; k < 2; k++) if (banT[k] > 0 && (banT[k] -= dt) <= 0) rbans[k].classList.remove('on');
+  for (let k = 0; k < 2; k++) {
+    const t = k && !P2.on ? '' : raceLine(k), el = rstats[k];
+    el.classList.toggle('on', !!t); if (el.textContent !== t) el.textContent = t;
+  }
+  const hint = $('joinHint'), show = started && !P2.on && link.ok && (!HOSTED || link.code);
+  hint.classList.toggle('on', !!show);
+  if (show && hint.dataset.code !== link.code) {
+    hint.dataset.code = link.code;
+    hint.innerHTML = HOSTED ? '<span id="joinQr"></span><span><b>Second player?</b> Scan this with a phone, or open this page on it and enter code <b class="code">' + link.code + '</b>. The screen splits when it joins.</span>'
+      : '<span><b>Second player?</b> Open this same link on another phone signed in to this account and tap <b>Use this phone as a steering wheel</b>.</span>';
+    if (HOSTED && window.QRCode) new QRCode($('joinQr'), { text: location.origin + location.pathname + '?pair=' + link.code, width: 56, height: 56, colorDark: '#0b1216', colorLight: '#ece2d0' });
+  }
+}
+// "P1" / "P2" over each car, drawn on top of everything in the other player's view so they can find each other
+function makeTag(txt, col) {
+  const cv = document.createElement('canvas'); cv.width = 96; cv.height = 52;
+  const g = cv.getContext('2d');
+  g.fillStyle = col; g.beginPath(); g.moveTo(10, 2); g.lineTo(86, 2); g.quadraticCurveTo(94, 2, 94, 10); g.lineTo(94, 34); g.quadraticCurveTo(94, 42, 86, 42);
+  g.lineTo(56, 42); g.lineTo(48, 50); g.lineTo(40, 42); g.lineTo(10, 42); g.quadraticCurveTo(2, 42, 2, 34); g.lineTo(2, 10); g.quadraticCurveTo(2, 2, 10, 2); g.fill();
+  g.fillStyle = '#fff'; g.font = "italic 800 30px 'Saira Condensed', 'Arial Narrow', sans-serif"; g.textAlign = 'center'; g.textBaseline = 'middle'; g.fillText(txt, 48, 23);
+  const tex = new THREE.CanvasTexture(cv); tex.encoding = THREE.sRGBEncoding;
+  const s = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, depthWrite: false, sizeAttenuation: false, fog: false, transparent: true }));
+  s.scale.set(0.11, 0.06, 1); s.center.set(0.5, 0); s.position.y = 1.7; s.renderOrder = 10; s.visible = false;
+  return s;
+}
+const tags = [makeTag('P1', '#c8321f'), makeTag('P2', '#1d5fa8')];
+carView.root.add(tags[0]); carView2.root.add(tags[1]);
+// before drawing player i's view: show only the other player's tag
+function showTagsFor(i) { tags[0].visible = P2.on && i === 1; tags[1].visible = P2.on && i === 0; }

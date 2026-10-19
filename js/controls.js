@@ -9,6 +9,7 @@ addEventListener('keydown', e => {
   if (!started) return;
   if (e.code === 'KeyC') camMode = (camMode + 1) % 3;
   if (e.code === 'KeyR') resetCar();
+  if (e.code === 'KeyG') startRace();
   if (e.code === 'KeyP') { paintIdx = (paintIdx + 1) % PAINTS.length; carMats.paint.color.copy(C(PAINTS[paintIdx])); }
   if (e.code === 'KeyT') { const a = car.assist, on = !(a.abs && a.tcs && a.steer && a.stab); a.abs = a.tcs = a.steer = a.stab = on; toast(on ? 'Assists on' : 'Assists off'); }
   if (e.code === 'KeyM') { muted = !muted; if (audio) audio.master.gain.value = muted ? 0 : 0.5; toast(muted ? 'Sound off' : 'Sound on'); }
@@ -171,7 +172,9 @@ body.pad #intro,body.pad #touch,body.pad .hud{display:none!important}
 #pSteer span{position:absolute;inset:auto 0 10px;text-align:center;font-size:13px;color:var(--dim);pointer-events:none}
 #pSteer i{position:absolute;top:50%;left:50%;width:54px;height:54px;margin:-27px 0 0 -27px;border-radius:50%;background:var(--accent);opacity:.9;pointer-events:none}
 #pSteer b{position:absolute;top:50%;left:12%;right:12%;height:2px;background:var(--line);pointer-events:none}
-#wheelPad .mid{display:grid;gap:8px;grid-template-rows:auto 1fr auto;justify-items:center;text-align:center;min-height:0}
+#wheelPad{box-shadow:inset 0 5px 0 var(--pc,transparent)}
+#padRace{font-family:var(--display);font-weight:800;font-style:italic;font-size:22px;line-height:1;color:var(--accent);min-height:0}
+#wheelPad .mid{display:grid;gap:8px;grid-template-rows:auto auto 1fr auto;justify-items:center;text-align:center;min-height:0}
 #wheelPad .stat{font-size:11px;color:var(--dim);max-width:36ch;line-height:1.45}
 #wheelPad .stat b{color:var(--good);font-weight:500}
 #wheelPad .ring{position:relative;height:100%;max-height:170px;aspect-ratio:1;min-height:0;align-self:center}
@@ -199,12 +202,12 @@ document.body.insertAdjacentHTML('beforeend', `
   <button id="pHb">Hand<br>brake</button>
   <button id="pBrk" class="pedal"><i></i><span>Brake</span></button>
   <div class="mid">
-    <div class="stat" id="padStat">Connecting…</div>
+    <div class="stat" id="padStat">Connecting…</div><div id="padRace"></div>
     <div class="ring"><svg viewBox="-50 -50 100 100" aria-hidden="true"><g id="padWheel" fill="none" stroke="currentColor">
       <circle r="44" stroke-width="7" stroke="rgba(236,226,208,.8)"/><path d="M-41 4 H-25 M25 4 H41 M0 27 V42" stroke-width="7" stroke="rgba(236,226,208,.55)"/>
       <path d="M-6 -44 H6" stroke-width="8" stroke="#f2a93b"/></g></svg>
       <div class="spd"><span id="padSpd">–</span><small>km/h</small></div></div>
-    <div class="btns"><button id="pMode">Touch steer</button><button id="pCtr">Centre</button><button id="pCam">Camera</button><button id="pRst">Reset</button><button id="pExit">Exit</button></div>
+    <div class="btns"><button id="pMode">Touch steer</button><button id="pCtr">Centre</button><button id="pCam">Camera</button><button id="pRst">Reset</button><button id="pRace">Race</button><button id="pExit">Exit</button></div>
   </div>
   <button id="pGas" class="pedal"><i></i><span>Gas</span></button>
 </div>`);
@@ -362,14 +365,14 @@ function pollWheels() {
   for (const p of fresh) {
     if (seats.some(s => s && s.id === p.id)) continue;
     const i = seats.indexOf(null); if (i < 0) break;
-    seats[i] = { id: p.id, r: p.d.r, c: p.d.c, live: true };
+    seats[i] = { id: p.id, r: p.d.r, c: p.d.c, q: p.d.q, live: true };
     if (i === 1) { setTwoPlayer(true); toast('Player 2 joined'); } else toast(seats[1] ? 'Player 1 wheel connected' : 'Phone wheel connected');
   }
   const t = performance.now();
   if (t - lastCarPub > 100 && (fresh.length || (HOSTED && link.conns.length))) {
     lastCarPub = t;
     const info = c => ({ k: Math.round(Math.abs(c.fwdSpeed) * 3.6), g: c.reverse ? 'R' : String(c.gear) }), p = {};
-    seats.forEach((s, i) => { if (s) p[s.id] = Object.assign(info(i ? P2.state : car), { n: i + 1 }); });
+    seats.forEach((s, i) => { if (s) p[s.id] = Object.assign(info(i ? P2.state : car), { n: i + 1, x: rec[i].hits, rc: raceLine(i) }); });
     link.sendCar(Object.assign(info(car), { on: started, p, full: !seats.includes(null) }));
   }
 }
@@ -381,6 +384,7 @@ function wheelInput(slot) {
   const w = p.d, num = (v, a, b) => clamp(Number(v) || 0, a, b);
   if (w.r !== s.r) { s.r = w.r; if (started) resetCar(); }
   if (w.c !== s.c) { s.c = w.c; if (started) camMode = (camMode + 1) % 3; }
+  if (w.q !== s.q) { s.q = w.q; if (!started) window.__game?.start?.(); startRace(); }
   return { s: num(w.s, -1, 1), g: num(w.g, 0, 1), b: num(w.b, 0, 1), h: w.h ? 1 : 0 };
 }
 // Audio can only start from a gesture on the computer itself; if the phone started the run, resume on the next one.
@@ -389,7 +393,7 @@ addEventListener('pointerdown', resumeAudio); addEventListener('keydown', resume
 
 /* ---- phone side ---- */
 const pad = { id: (() => { try { let v = sessionStorage.getItem('rd-wheel-id'); if (!v) sessionStorage.setItem('rd-wheel-id', v = Math.random().toString(36).slice(2, 10)); return v; } catch (e) { return Math.random().toString(36).slice(2, 10); } })(),
-  s: 0, g: 0, b: 0, h: 0, r: 0, c: 0, a0: null, a: 0, gx: 0, gy: 0, sensor: false, touch: false, picked: false, why: '', beat: 0, tilt: 0 };
+  s: 0, g: 0, b: 0, h: 0, r: 0, c: 0, q: 0, hitN: null, a0: null, a: 0, gx: 0, gy: 0, sensor: false, touch: false, picked: false, why: '', beat: 0, tilt: 0 };
 const padEl = document.getElementById('wheelPad');
 function setTouchSteer(on) {
   pad.touch = on; padEl.classList.toggle('touchsteer', on);
@@ -469,7 +473,7 @@ function padFrame(now) {
   requestAnimationFrame(padFrame);
   if (now - pad.beat > 300) pad.beat = now;
   const r2 = v => Math.round(v * 100) / 100;
-  if (link.ok) link.sendWheel({ i: pad.id, s: r2(pad.s), g: r2(pad.g), b: r2(pad.b), h: pad.h, r: pad.r, c: pad.c, t: Math.round(pad.beat) });
+  if (link.ok) link.sendWheel({ i: pad.id, s: r2(pad.s), g: r2(pad.g), b: r2(pad.b), h: pad.h, r: pad.r, c: pad.c, q: pad.q, t: Math.round(pad.beat) });
   document.getElementById('padWheel').setAttribute('transform', 'rotate(' + (pad.s * WHEEL_LOCK * 57.3).toFixed(1) + ')');
   document.querySelector('#pGas i').style.height = (pad.g * 100) + '%';
   document.querySelector('#pBrk i').style.height = (pad.b * 100) + '%';
@@ -477,6 +481,12 @@ function padFrame(now) {
   // two players: the game sends each phone its own car under p[phone id]
   const mine = game && game.p && game.p[pad.id], me = mine || game, full = game && game.p && !mine && game.full;
   const who = mine && (game.p && Object.keys(game.p).length > 1 || mine.n > 1) ? 'Player ' + mine.n + ' · ' : '';
+  // the phone takes its car's colour, buzzes on hard hits, and shows the race in big type
+  const pc = mine && mine.n === 2 ? '#3d7fd0' : mine ? '#d9483a' : '';
+  if (padEl.dataset.pc !== pc) { padEl.dataset.pc = pc; padEl.style.setProperty('--pc', pc || 'transparent'); }
+  if (mine && mine.x != null) { if (pad.hitN != null && mine.x > pad.hitN) try { navigator.vibrate?.(90); } catch (e) {} pad.hitN = mine.x; }
+  const rc = mine && mine.rc || '', rcEl = document.getElementById('padRace');
+  if (rcEl.textContent !== rc) rcEl.textContent = rc;
   const why = { blocked: 'this page isn’t allowed to read the tilt sensor', denied: 'motion access was refused', silent: 'no tilt readings reached this page' }[pad.why];
   const how = pad.touch ? (why ? 'Touch steering: ' + why + '.' : 'Touch steering.') : 'Tilt to steer.';
   const msg = link.err ? link.err
@@ -503,6 +513,7 @@ for (const [id, k] of [['pGas', 'g'], ['pBrk', 'b']]) {
   hb.addEventListener('pointerdown', on(1)); hb.addEventListener('pointerup', on(0)); hb.addEventListener('pointercancel', on(0)); hb.addEventListener('pointerleave', on(0));
   document.getElementById('pRst').addEventListener('click', () => { pad.r++; });
   document.getElementById('pCam').addEventListener('click', () => { pad.c++; });
+  document.getElementById('pRace').addEventListener('click', () => { pad.q++; });
   document.getElementById('pCtr').addEventListener('click', () => { pad.a0 = pad.a; pad.tilt = 0; if (!pad.touch) pad.s = 0; });
   document.getElementById('pMode').addEventListener('click', () => { pad.picked = true; setTouchSteer(!pad.touch); });
   document.getElementById('pExit').addEventListener('click', exitPad);
