@@ -52,6 +52,8 @@ const drift = { cur: 0, timer: 0, total: 0 };
 let clock = 0;
 function onCrash() { if (drift.cur > 50) { drift.cur = 0; drift.timer = 0; toast('Drift lost'); } }
 function updateLap(dt) {
+  // during a race (players.js) the race banners speak instead of the lap toasts
+  const say = typeof race !== 'undefined' && race.ph !== 'idle' ? () => {} : toast;
   roadQuery(car.pos.x, car.pos.z);
   if (RQ.d < 30) {
     const prog = (RQ.i + RQ.t) / road.N;
@@ -60,12 +62,12 @@ function updateLap(dt) {
         if (lap.armed && lap.half) {
           const t = clock - lap.start; lap.last = t;
           if (!lap.best || t < lap.best) {
-            lap.best = t; toast('New best lap ' + fmt(t));
+            lap.best = t; say('New best lap ' + fmt(t));
             // one record per computer: in split screen a player's personal best only saves when it beats it
             try { const b = parseFloat(localStorage.getItem('ridgeline-best')); if (!(b > 0) || t < b) localStorage.setItem('ridgeline-best', String(t)); } catch (e) {}
           }
-          else toast('Lap ' + fmt(t));
-        } else if (!lap.armed) toast('Lap started');
+          else say('Lap ' + fmt(t));
+        } else if (!lap.armed) say('Lap started');
         lap.armed = true; lap.half = false; lap.start = clock;
       } else if (lap.lastProg < 0.1 && prog > 0.9) { lap.armed = false; }
       if (prog > 0.45 && prog < 0.55) lap.half = true;

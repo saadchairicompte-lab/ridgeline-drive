@@ -35,6 +35,7 @@ function frame(now) {
   const dt = Math.min((now - last) / 1000, 0.05); last = now; clock += dt;
   pollWheels();
   eachPlayer(i => readInput(dt, i));
+  if (race.ph === 'countdown') eachPlayer(() => { car.thrIn = car.brkIn = 0; car.hand = 1; });   // held on the grid
   acc += dt; let n = 0; while (acc >= DT && n < 8) { stepCars(DT); acc -= DT; n++; } if (n >= 8) acc = 0;
   eachPlayer(i => {
     if (car.pos.y < -60 || !isFinite(car.pos.x)) resetCar();
@@ -43,7 +44,9 @@ function frame(now) {
     syncVisuals(dt, i ? carView2 : carView, i ? carMats2 : carMats);
     updateCamera(dt);
     if (started) updateLap(dt);
+    assistPlayer(i, dt);
   });
+  updateRace(dt); updateRaceHud(dt);
   updateTiles(car.pos.x, car.pos.z, 0, twoUp() ? P2.state.pos.x : null, twoUp() ? P2.state.pos.z : null);
   updateSmoke(dt);
   updateAudio();
@@ -70,12 +73,12 @@ function placeScene() {
 }
 // One view, or two stacked: player 1 on top, player 2 below, each drawn with its own camera.
 function renderViews() {
-  if (!twoUp()) { placeScene(); renderer.render(scene, camera); return; }
+  if (!twoUp()) { showTagsFor(0); placeScene(); renderer.render(scene, camera); return; }
   const w = innerWidth, h = innerHeight, top = Math.floor(h / 2);
   renderer.setScissorTest(true);
   eachPlayer(i => {
     const y = i ? 0 : h - top, vh = i ? h - top : top;
-    placeScene(); renderer.setViewport(0, y, w, vh); renderer.setScissor(0, y, w, vh);
+    showTagsFor(i); placeScene(); renderer.setViewport(0, y, w, vh); renderer.setScissor(0, y, w, vh);
     smokeMat.uniforms.uScale.value = vh * renderer.getPixelRatio() / 2;
     secondView = i === 1; renderer.render(scene, camera);
   });
@@ -100,6 +103,6 @@ async function boot(data) {
   go.addEventListener('click', start);
   addEventListener('keydown', e => { if (!started && (e.code === 'Enter')) start(); });
   window.claude?.hot?.snapshot?.(() => ({ pos: car.pos.toArray(), q: car.q.toArray(), drift: drift.total, best: lap.best }));
-  window.__game = { car, road, H, tiles, buildTile, step: physicsStep, keys, readInput, renderer, get started() { return started; }, start, P2, seats, setTwoPlayer, swapPlayer, stepCars, link };
+  window.__game = { car, road, H, tiles, buildTile, step: physicsStep, keys, readInput, renderer, get started() { return started; }, start, P2, seats, setTwoPlayer, swapPlayer, stepCars, link, race, startRace, rec };
 }
 setTimeout(() => { window.claude?.hot?.ready ? window.claude.hot.ready(boot) : boot(window.claude?.hot?.data ?? {}); }, 30);
